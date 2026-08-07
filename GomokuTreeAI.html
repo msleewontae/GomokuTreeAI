@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MCTS 지능형 오목 AI 웹앱</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #1e2022;
+      color: #f0f2f5;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    h1 { margin-bottom: 8px; font-size: 1.8rem; color: #4dabf7; }
+    .subtitle { margin-bottom: 20px; font-size: 0.95rem; color: #a0a6b0; }
+    .status-panel {
+      background: #2b2d31;
+      padding: 12px 24px;
+      border-radius: 8px;
+      margin-bottom: 16px;
+      font-weight: 600;
+      display: flex;
+      gap: 20px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    .status-item span { color: #4dabf7; }
+    #board-container {
+      position: relative;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    canvas { background-color: #e3a857; display: block; cursor: pointer; }
+    .controls { margin-top: 20px; display: flex; gap: 12px; }
+    button {
+      padding: 10px 20px;
+      font-size: 0.95rem;
+      font-weight: bold;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      background-color: #3182ce;
+      color: white;
+      transition: background 0.2s;
+    }
+    button:hover { background-color: #2b6cb0; }
+  </style>
+</head>
+<body>
+
+  <h1>MCTS 지능형 오목 AI</h1>
+  <p class="subtitle">웹 브라우저 클라이언트 사이드 MCTS 탐색 트리가 작동하는 대국장입니다.</p>
+
+  <div class="status-panel">
+    <div class="status-item">현재 순서: <span id="turn-text">흑선 (사용자)</span></div>
+    <div class="status-item">상태: <span id="status-text">대국 진행 중</span></div>
+  </div>
+
+  <div id="board-container">
+    <canvas id="gomokuCanvas" width="540" height="540"></canvas>
+  </div>
+
+  <div class="controls">
+    <button onclick="resetGame()">새 게임 시작</button>
+  </div>
+
+<script>
+const SIZE = 15;
+const CELL_SIZE = 36;
+const PADDING = 18;
+const canvas = document.getElementById('gomokuCanvas');
+const ctx = canvas.getContext('2d');
+
+let board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0)); // 0: 빈칸, 1: 흑(사용자), 2: 백(AI)
+let gameOver = false;
+let currentPlayer = 1; // 1: 사용자, 2: AI
+let lastMove = null;
+
+// ==========================================
+// 1. MCTS 노드 및 탐색 알고리즘
+// ==========================================
+class MCTSNode {
+  constructor(parent = null, priorP = 1.0) {
+    this.parent = parent;
+    this.children = new Map(); // "r,c" -> MCTSNode
+    this.visitCount = 0;
+    this.totalValue = 0.0;
+    this.priorP = priorP;
+  }
+
+  get qValue() {
+    return this.visitCount > 0 ? this.totalValue / this.visitCount : 0.0;
+  }
+
+  puctScore(cPuct = 3.0) {
+    const parentVisits = this.parent ? this.parent.visitCount : 1;
+    const u = cPuct * this.priorP * (Math.sqrt(parentVisits) / (1 + this.visitCount));
+    return this.qValue + u;
+  }
+}
+
+// 착수 가능성이 높은 유망 노드만 필터링 (기존 돌의 2칸 이내 주변)
+function getCandidateMoves(b) {
+  const candidates = [];
+  const visited = Array.from({ length: SIZE }, () => Array(SIZE).fill(false));
+  let hasStones = false;
+
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (b[r][c] !== 0) {
+        hasStones = true;
+        for (let dr = -2; dr <= 2; dr++) {
+          for (let dc = -2; dc <= 2; dc++) {
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && b[nr][nc] === 0 && !visited[nr][nc]) {
+              visited[nr][nc] = true;
+              candidates.push([nr, nc]);
+            }
+          }
+        }
+      }
+    }
+  }
+  return hasStones ? candidates : [[7, 7]];
+}
+
+// 휴리스틱 평가 함수 (신경망 역할 대체)
+function evaluateBoard(b, player) {
+  const opponent = 3 - player;
+  let pScore = 0, oScore = 0;
+
+  function countPattern(p) {
+    let score = 0;
+    const dirs = [[1,0], [0,1], [1,1], [1,-1]];
+    for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE; c++) {
+        if (b[r][c] !== p) continue;
+        for (let [dr, dc] of dirs) {
+          let count = 1;
+          for (let step = 1; step < 5; step++) {
+            let nr = r + dr * step, nc = c + dc * step;
+            if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && b[nr][nc] === p) count++;
+            else break;
+          }
+          if (count >= 5) score += 10000;
+          else if (count === 4) score += 500;
+          else if (count === 3) score += 50;
+        }
+      }
+    }
+    return score;
+  }
+
+  pScore = countPattern(player);
+  oScore = countPattern(opponent);
+  const diff = pScore - oScore * 1.2;
+  return Math.max(-1.0, Math.min(1.0, diff / 500.0));
+}
+
+function runMCTS(rootBoard, simulations = 300) {
+  const root = new MCTSNode();
+  const candidates = getCandidateMoves(rootBoard);
+  const priorProb = 1.0 / candidates.length;
+
+  for (let [r, c] of candidates) {
+    root.children.set(`${r},${c}`, new MCTSNode(root, priorProb));
+  }
+
+  for (let i = 0; i < simulations; i++) {
+    let node = root;
+    let simBoard = rootBoard.map(row => [...row]);
+    let currPlayer = 2; // AI turn
+
+    // 1. Selection
+    while (node.children.size > 0 && !checkWin(simBoard)) {
+      let bestKey = null, bestScore = -Infinity;
+      for (let [key, childNode] of node.children.entries()) {
+        const score = childNode.puctScore();
+        if (score > bestScore) {
+          bestScore = score;
+          bestKey = key;
+        }
+      }
+      if (!bestKey) break;
+      const [r, c] = bestKey.split(',').map(Number);
+      simBoard[r][c] = currPlayer;
+      currPlayer = 3 - currPlayer;
+      node = node.children.get(bestKey);
+    }
+
+    // 2. Expansion & Evaluation
+    let value = 0;
+    if (checkWin(simBoard)) {
+      value = simBoard[lastMove[0]][lastMove[1]] === 2 ? 1.0 : -1.0;
+    } else {
+      const subCandidates = getCandidateMoves(simBoard);
+      const subProb = 1.0 / subCandidates.length;
+      for (let [r, c] of subCandidates) {
+        node.children.set(`${r},${c}`, new MCTSNode(node, subProb));
+      }
+      value = evaluateBoard(simBoard, 2);
+    }
+
+    // 3. Backpropagation
+    while (node !== null) {
+      node.visitCount++;
+      node.totalValue += value;
+      value = -value;
+      node = node.parent;
+    }
+  }
+
+  // 4. Action Selection
+  let bestAction = null, maxVisits = -1;
+  for (let [key, childNode] of root.children.entries()) {
+    if (childNode.visitCount > maxVisits) {
+      maxVisits = childNode.visitCount;
+      bestAction = key.split(',').map(Number);
+    }
+  }
+  return bestAction;
+}
+
+// ==========================================
+// 2. 승리 판정 및 그래픽 렌더링
+// ==========================================
+function checkWin(b) {
+  const dirs = [[1,0], [0,1], [1,1], [1,-1]];
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (b[r][c] === 0) continue;
+      const p = b[r][c];
+      for (let [dr, dc] of dirs) {
+        let count = 1;
+        for (let step = 1; step < 5; step++) {
+          let nr = r + dr * step, nc = c + dc * step;
+          if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && b[nr][nc] === p) count++;
+          else break;
+        }
+        if (count >= 5) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function drawBoard() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // 격자선 그리기
+  ctx.strokeStyle = '#4a2e00';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < SIZE; i++) {
+    ctx.beginPath();
+    ctx.moveTo(PADDING + i * CELL_SIZE, PADDING);
+    ctx.lineTo(PADDING + i * CELL_SIZE, PADDING + (SIZE - 1) * CELL_SIZE);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(PADDING, PADDING + i * CELL_SIZE);
+    ctx.lineTo(PADDING + (SIZE - 1) * CELL_SIZE, PADDING + i * CELL_SIZE);
+    ctx.stroke();
+  }
+
+  // 화점(Star points) 표시
+  const starPoints = [[3,3], [3,11], [7,7], [11,3], [11,11]];
+  ctx.fillStyle = '#4a2e00';
+  starPoints.forEach(([r, c]) => {
+    ctx.beginPath();
+    ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, 3, 0, 2 * Math.PI);
+    ctx.fill();
+  });
+
+  // 돌 그리기
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (board[r][c] !== 0) {
+        const x = PADDING + c * CELL_SIZE;
+        const y = PADDING + r * CELL_SIZE;
+        ctx.beginPath();
+        ctx.arc(x, y, CELL_SIZE / 2 - 2, 0, 2 * Math.PI);
+        
+        if (board[r][c] === 1) { // 흑돌
+          ctx.fillStyle = '#111';
+          ctx.fill();
+        } else { // 백돌
+          ctx.fillStyle = '#fff';
+          ctx.fill();
+          ctx.strokeStyle = '#ccc';
+          ctx.stroke();
+        }
+
+        // 마지막 착수 표시
+        if (lastMove && lastMove[0] === r && lastMove[1] === c) {
+          ctx.beginPath();
+          ctx.arc(x, y, 4, 0, 2 * Math.PI);
+          ctx.fillStyle = '#e53e3e';
+          ctx.fill();
+        }
+      }
+    }
+  }
+}
+
+// ==========================================
+// 3. 사용자 인터랙션 처리
+// ==========================================
+canvas.addEventListener('click', (e) => {
+  if (gameOver || currentPlayer !== 1) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const c = Math.round((x - PADDING) / CELL_SIZE);
+  const r = Math.round((y - PADDING) / CELL_SIZE);
+
+  if (r >= 0 && r < SIZE && c >= 0 && c < SIZE && board[r][c] === 0) {
+    makeMove(r, c, 1);
+
+    if (!gameOver) {
+      currentPlayer = 2;
+      document.getElementById('turn-text').innerText = '백선 (AI 연산 중...)';
+      document.getElementById('status-text').innerText = 'MCTS 트리 탐색 진행 중';
+
+      setTimeout(() => {
+        const aiMove = runMCTS(board, 400); // 400회 탐색
+        if (aiMove) makeMove(aiMove[0], aiMove[1], 2);
+        
+        if (!gameOver) {
+          currentPlayer = 1;
+          document.getElementById('turn-text').innerText = '흑선 (사용자)';
+          document.getElementById('status-text').innerText = '대국 진행 중';
+        }
+      }, 50);
+    }
+  }
+});
+
+function makeMove(r, c, player) {
+  board[r][c] = player;
+  lastMove = [r, c];
+  drawBoard();
+
+  if (checkWin(board)) {
+    gameOver = true;
+    const winner = player === 1 ? '사용자 (흑)' : 'MCTS AI (백)';
+    document.getElementById('status-text').innerText = `🎉 ${winner} 승리!`;
+    document.getElementById('turn-text').innerText = '대국 종료';
+  }
+}
+
+function resetGame() {
+  board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
+  gameOver = false;
+  currentPlayer = 1;
+  lastMove = null;
+  document.getElementById('turn-text').innerText = '흑선 (사용자)';
+  document.getElementById('status-text').innerText = '대국 진행 중';
+  drawBoard();
+}
+
+drawBoard();
+</script>
+</body>
+</html>
