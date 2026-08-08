@@ -261,21 +261,33 @@ function checkWin(b) {
 function drawBoard() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   
-  // 격자선 그리기
-  ctx.strokeStyle = '#4a2e00'; ctx.lineWidth = 1;
+  ctx.strokeStyle = '#4a2e00'; 
+  ctx.lineWidth = 1;
+
   for (let i = 0; i < SIZE; i++) {
-    ctx.beginPath(); ctx.moveTo(PADDING + i * CELL_SIZE, PADDING); ctx.lineTo(PADDING + i * CELL_SIZE, PADDING + (SIZE - 1) * CELL_SIZE); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(PADDING, PADDING + i * CELL_SIZE); ctx.lineTo(PADDING + (SIZE - 1) * CELL_SIZE, PADDING + (SIZE - 1) * CELL_SIZE); ctx.stroke();
+    // 세로선 그리기
+    ctx.beginPath(); 
+    ctx.moveTo(PADDING + i * CELL_SIZE, PADDING); 
+    ctx.lineTo(PADDING + i * CELL_SIZE, PADDING + (SIZE - 1) * CELL_SIZE); 
+    ctx.stroke();
+
+    // 가로선 그리기 (오타 수정 부분)
+    ctx.beginPath(); 
+    ctx.moveTo(PADDING, PADDING + i * CELL_SIZE); 
+    ctx.lineTo(PADDING + (SIZE - 1) * CELL_SIZE, PADDING + i * CELL_SIZE); 
+    ctx.stroke();
   }
 
   // 화점(Star Points) 표시
   const starPoints = [[3,3], [3,11], [7,7], [11,3], [11,11]];
   ctx.fillStyle = '#4a2e00';
   starPoints.forEach(([r, c]) => {
-    ctx.beginPath(); ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, 3, 0, 2 * Math.PI); ctx.fill();
+    ctx.beginPath(); 
+    ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, 3, 0, 2 * Math.PI); 
+    ctx.fill();
   });
 
-  // 돌 그리기
+  // 돌 및 마지막 착수 위치 표시
   for (let r = 0; r < SIZE; r++) {
     for (let c = 0; c < SIZE; c++) {
       if (board[r][c] !== 0) {
@@ -287,10 +299,11 @@ function drawBoard() {
         ctx.fill();
         if (board[r][c] === 2) { ctx.strokeStyle = '#ccc'; ctx.stroke(); }
 
-        // 마지막 착수 위치 빨간 점 표시
         if (lastMove && lastMove[0] === r && lastMove[1] === c) {
-          ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI);
-          ctx.fillStyle = '#e53e3e'; ctx.fill();
+          ctx.beginPath(); 
+          ctx.arc(x, y, 4, 0, 2 * Math.PI);
+          ctx.fillStyle = '#e53e3e'; 
+          ctx.fill();
         }
       }
     }
