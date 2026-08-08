@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AlphaGomoku - ONNX MCTS Engine</title>
+  <title>AlphaGomoku - ONNX Hybrid Engine</title>
 
-  <!-- 1. ONNX Runtime Web CDN (필수) -->
+  <!-- 1. ONNX Runtime Web CDN (최신 1.18.0 버전 적용) -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
 
   <style>
@@ -21,21 +21,23 @@
     .status-panel {
       background: #2b2d31; padding: 12px 24px; border-radius: 8px;
       margin-bottom: 16px; font-weight: 600; display: flex; gap: 20px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     }
     .status-item span { color: #4dabf7; }
-    #board-container { position: relative; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border-radius: 4px; }
+    #board-container { position: relative; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border-radius: 4px; overflow: hidden; }
     canvas { background-color: #e3a857; display: block; cursor: pointer; }
     .controls { margin-top: 20px; }
     button {
       padding: 10px 20px; font-weight: bold; border: none; border-radius: 6px;
-      cursor: pointer; background-color: #3182ce; color: white;
+      cursor: pointer; background-color: #3182ce; color: white; transition: background 0.2s;
     }
+    button:hover { background-color: #2b6cb0; }
   </style>
 </head>
 <body>
 
   <h1>AlphaGomoku AI</h1>
-  <p class="subtitle">ONNX 신경망 추론 + MCTS 웹 어플리케이션</p>
+  <p class="subtitle">ONNX 신경망 추론 + 스마트 전술 백업 웹 어플리케이션</p>
 
   <div class="status-panel">
     <div class="status-item">현재 순서: <span id="turn-text">흑선 (사용자)</span></div>
@@ -63,71 +65,143 @@ let currentPlayer = 1;
 let lastMove = null;
 let ortSession = null;
 
-// 2. ONNX 신경망 모델 불러오기
+// ==========================================
+// 1. ONNX 신경망 모델 불러오기 (WASM 안전 로딩)
+// ==========================================
 async function initONNX() {
   try {
+    ort.env.wasm.numThreads = 1;
     ortSession = await ort.InferenceSession.create('./gomoku_model.onnx', {
-      executionProviders: ['webgl', 'wasm'] // GPU 가속 우선
+      executionProviders: ['wasm']
     });
-    document.getElementById('status-text').innerText = '대국 진행 가능';
+    document.getElementById('status-text').innerText = 'ONNX 신경망 연동 완료';
   } catch (e) {
-    console.error(e);
-    document.getElementById('status-text').innerText = '모델 로드 실패 (.onnx 파일 확인)';
+    console.warn('ONNX 로드 실패 (패턴 가중치 엔진으로 자동 전환합니다):', e);
+    document.getElementById('status-text').innerText = '대국 진행 가능 (규칙 패턴 엔진)';
   }
 }
-initONNX();
 
-// 3. ONNX 모델 추론 함수
-async function predictPolicyValue(b) {
-  if (!ortSession) return { policy: null, value: 0 };
-
-  // 보드 상태를 1x4x15x15 텐서 배열 형태로 변환 (PyTorch 입력 규격)
-  const inputData = new Float32Array(4 * 15 * 15);
-  for (let r = 0; r < SIZE; r++) {
-    for (let c = 0; c < SIZE; c++) {
-      const idx = r * SIZE + c;
-      if (b[r][c] === 2) inputData[idx] = 1.0;            // AI 돌
-      if (b[r][c] === 1) inputData[15 * 15 + idx] = 1.0; // 사용자 돌
-      if (currentPlayer === 2) inputData[2 * 15 * 15 + idx] = 1.0; // AI 턴 정보
-    }
-  }
-
-  const tensor = new ort.Tensor('float32', inputData, [1, 4, 15, 15]);
-  const results = await ortSession.run({ input: tensor });
-
-  // 결과 추출 (Policy: 225개 확률 array, Value: 승률 -1.0~1.0)
-  const policy = results.policy.data;
-  const value = results.value.data[0];
-
-  return { policy, value };
-}
-
-// 4. MCTS 노드 및 탐색 함수
-async function runONNXMCTS(rootBoard, simulations = 200) {
+// ==========================================
+// 2. AI 하이브리드 착수 계산 로직
+// ==========================================
+async function runONNXMCTS(rootBoard) {
   const candidates = getCandidates(rootBoard);
   if (candidates.length === 0) return [7, 7];
 
-  // 즉시 승리/방어 수 사전 검사
-  let winMove = findWinMove(rootBoard, 2); if (winMove) return winMove;
-  let blockMove = findWinMove(rootBoard, 1); if (blockMove) return blockMove;
+  // [전술 1순위] AI 즉시 5목 완성(승리)
+  let winMove = findWinMove(rootBoard, 2); 
+  if (winMove) return winMove;
 
-  // 신경망 추론으로 초기 가중치 획득
-  const { policy, value } = await predictPolicyValue(rootBoard);
+  // [전술 2순위] 사용자 4목 필사적 차단
+  let blockMove = findWinMove(rootBoard, 1); 
+  if (blockMove) return blockMove;
 
+  // [전술 3순위] 사용자 열린 3목/위협 길목 선제 차단
+  let threatMove = findThreatMove(rootBoard, 1);
+  if (threatMove) return threatMove;
+
+  // ONNX 신경망 추론
+  let policy = null;
+  if (ortSession) {
+    try {
+      const inputData = new Float32Array(4 * 15 * 15);
+      for (let r = 0; r < SIZE; r++) {
+        for (let c = 0; c < SIZE; c++) {
+          const idx = r * SIZE + c;
+          if (rootBoard[r][c] === 2) inputData[idx] = 1.0;
+          if (rootBoard[r][c] === 1) inputData[15 * 15 + idx] = 1.0;
+          if (currentPlayer === 2) inputData[2 * 15 * 15 + idx] = 1.0;
+        }
+      }
+      const tensor = new ort.Tensor('float32', inputData, [1, 4, 15, 15]);
+      const results = await ortSession.run({ input: tensor });
+      policy = results.policy.data;
+    } catch (err) {
+      console.error('ONNX 추론 에러:', err);
+    }
+  }
+
+  // [전술 4순위] 신경망 확률(Policy) + 룰 기반 정밀 평가 점수 결합
   let bestMove = candidates[0];
   let maxScore = -Infinity;
 
   for (let [r, c] of candidates) {
     const idx = r * SIZE + c;
-    const priorP = policy ? policy[idx] : 1.0 / candidates.length;
+    const nnScore = policy ? policy[idx] * 1000 : 0;
     
-    // 단순 가중치 계산 (MCTS 노드 간이 계산)
-    if (priorP > maxScore) {
-      maxScore = priorP;
+    // 패턴 시뮬레이션 가중치
+    rootBoard[r][c] = 2;
+    const ruleScore = evaluatePattern(rootBoard);
+    rootBoard[r][c] = 0;
+
+    const totalScore = nnScore + ruleScore;
+    if (totalScore > maxScore) {
+      maxScore = totalScore;
       bestMove = [r, c];
     }
   }
+
   return bestMove;
+}
+
+// ==========================================
+// 3. 패턴 평가 및 유틸리티 알고리즘
+// ==========================================
+function findThreatMove(b, p) {
+  for (let [r, c] of getCandidates(b)) {
+    b[r][c] = p;
+    let maxLine = getMaxLine(b, r, c, p);
+    b[r][c] = 0;
+    if (maxLine >= 4) return [r, c]; // 상대가 둘 때 4목 이상 형성되는 곳 방어
+  }
+  return null;
+}
+
+function getMaxLine(b, r, c, p) {
+  const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+  let maxLen = 0;
+  for (let [dr, dc] of dirs) {
+    let count = 1;
+    for (let s = 1; s < 5; s++) {
+      let nr = r + dr * s, nc = c + dc * s;
+      if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && b[nr][nc] === p) count++;
+      else break;
+    }
+    for (let s = 1; s < 5; s++) {
+      let nr = r - dr * s, nc = c - dc * s;
+      if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && b[nr][nc] === p) count++;
+      else break;
+    }
+    if (count > maxLen) maxLen = count;
+  }
+  return maxLen;
+}
+
+function evaluatePattern(b) {
+  return countScore(b, 2) - countScore(b, 1) * 1.4; // 방어 가중치 강화
+}
+
+function countScore(b, p) {
+  let score = 0;
+  const dirs = [[1,0],[0,1],[1,1],[1,-1]];
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      if (b[r][c] !== p) continue;
+      for (let [dr, dc] of dirs) {
+        let count = 1;
+        for (let s = 1; s < 5; s++) {
+          let nr = r + dr * s, nc = c + dc * s;
+          if (nr >= 0 && nr < SIZE && nc >= 0 && nc < SIZE && b[nr][nc] === p) count++;
+          else break;
+        }
+        if (count >= 5) score += 100000;
+        else if (count === 4) score += 10000;
+        else if (count === 3) score += 1000;
+        else if (count === 2) score += 100;
+      }
+    }
+  }
+  return score;
 }
 
 function getCandidates(b) {
@@ -181,23 +255,41 @@ function checkWin(b) {
   return false;
 }
 
-// 5. 렌더링 및 UI
+// ==========================================
+// 4. UI 및 렌더링 함수
+// ==========================================
 function drawBoard() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  
+  // 격자선 그리기
   ctx.strokeStyle = '#4a2e00'; ctx.lineWidth = 1;
   for (let i = 0; i < SIZE; i++) {
     ctx.beginPath(); ctx.moveTo(PADDING + i * CELL_SIZE, PADDING); ctx.lineTo(PADDING + i * CELL_SIZE, PADDING + (SIZE - 1) * CELL_SIZE); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(PADDING, PADDING + i * CELL_SIZE); ctx.lineTo(PADDING + (SIZE - 1) * CELL_SIZE, PADDING + i * CELL_SIZE); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PADDING, PADDING + i * CELL_SIZE); ctx.lineTo(PADDING + (SIZE - 1) * CELL_SIZE, PADDING + (SIZE - 1) * CELL_SIZE); ctx.stroke();
   }
+
+  // 화점(Star Points) 표시
+  const starPoints = [[3,3], [3,11], [7,7], [11,3], [11,11]];
+  ctx.fillStyle = '#4a2e00';
+  starPoints.forEach(([r, c]) => {
+    ctx.beginPath(); ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, 3, 0, 2 * Math.PI); ctx.fill();
+  });
+
+  // 돌 그리기
   for (let r = 0; r < SIZE; r++) {
     for (let c = 0; c < SIZE; c++) {
       if (board[r][c] !== 0) {
+        const x = PADDING + c * CELL_SIZE;
+        const y = PADDING + r * CELL_SIZE;
         ctx.beginPath();
-        ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, CELL_SIZE / 2 - 2, 0, 2 * Math.PI);
+        ctx.arc(x, y, CELL_SIZE / 2 - 2, 0, 2 * Math.PI);
         ctx.fillStyle = board[r][c] === 1 ? '#111' : '#fff';
-        ctx.fill(); if (board[r][c] === 2) { ctx.strokeStyle = '#ccc'; ctx.stroke(); }
+        ctx.fill();
+        if (board[r][c] === 2) { ctx.strokeStyle = '#ccc'; ctx.stroke(); }
+
+        // 마지막 착수 위치 빨간 점 표시
         if (lastMove && lastMove[0] === r && lastMove[1] === c) {
-          ctx.beginPath(); ctx.arc(PADDING + c * CELL_SIZE, PADDING + r * CELL_SIZE, 4, 0, 2 * Math.PI);
+          ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI);
           ctx.fillStyle = '#e53e3e'; ctx.fill();
         }
       }
@@ -206,24 +298,28 @@ function drawBoard() {
 }
 
 canvas.addEventListener('click', async (e) => {
-  if (gameOver || currentPlayer !== 1 || !ortSession) return;
+  if (gameOver || currentPlayer !== 1) return;
+
   const rect = canvas.getBoundingClientRect();
   const c = Math.round((e.clientX - rect.left - PADDING) / CELL_SIZE);
   const r = Math.round((e.clientY - rect.top - PADDING) / CELL_SIZE);
 
   if (r >= 0 && r < SIZE && c >= 0 && c < SIZE && board[r][c] === 0) {
     makeMove(r, c, 1);
+
     if (!gameOver) {
       currentPlayer = 2;
-      document.getElementById('turn-text').innerText = '백선 (ONNX 추론 중...)';
-      
-      const aiMove = await runONNXMCTS(board);
-      if (aiMove) makeMove(aiMove[0], aiMove[1], 2);
+      document.getElementById('turn-text').innerText = '백선 (AI 연산 중...)';
 
-      if (!gameOver) {
-        currentPlayer = 1;
-        document.getElementById('turn-text').innerText = '흑선 (사용자)';
-      }
+      setTimeout(async () => {
+        const aiMove = await runONNXMCTS(board);
+        if (aiMove) makeMove(aiMove[0], aiMove[1], 2);
+
+        if (!gameOver) {
+          currentPlayer = 1;
+          document.getElementById('turn-text').innerText = '흑선 (사용자)';
+        }
+      }, 50);
     }
   }
 });
@@ -232,7 +328,8 @@ function makeMove(r, c, p) {
   board[r][c] = p; lastMove = [r, c]; drawBoard();
   if (checkWin(board)) {
     gameOver = true;
-    document.getElementById('status-text').innerText = `🎉 ${p === 1 ? '사용자' : 'AI'} 승리!`;
+    document.getElementById('status-text').innerText = `🎉 ${p === 1 ? '사용자 (흑)' : 'AI (백)'} 승리!`;
+    document.getElementById('turn-text').innerText = '대국 종료';
   }
 }
 
@@ -240,11 +337,13 @@ function resetGame() {
   board = Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
   gameOver = false; currentPlayer = 1; lastMove = null;
   document.getElementById('turn-text').innerText = '흑선 (사용자)';
-  document.getElementById('status-text').innerText = '대국 진행 가능';
+  document.getElementById('status-text').innerText = ortSession ? 'ONNX 신경망 연동 완료' : '대국 진행 가능';
   drawBoard();
 }
 
+// 화면 초기화 및 모델 로드
 drawBoard();
+initONNX();
 </script>
 </body>
 </html>
